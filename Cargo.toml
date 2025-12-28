@@ -1,0 +1,9 @@
+[package]
+name = "taffy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thiserror = "2.0.17"
+tactical = { path = "../tactical" }
+num = "0.4.3"
