@@ -7,7 +7,7 @@ Types are unnamed; they are anonymous. Instead of `Vec2` being special and refer
 Pair(L, R) -> type = (L, R);
 ```
 
-So if types are anonymous, how do you do methods? Interfaces? How do you keep information about what types actually represent? Markings is how Taffy does that.
+So if types are anonymous, how do you do methods? Interfaces? How do you keep information about what types actually represent? Markings are how Taffy does that. Markings start with a dollar sign (`$`).
 
 Every type has a set of markings. `Vec2` can be defined as follows:
 ```
@@ -24,7 +24,7 @@ This declares the `$Vec2` marking and `Vec2` which implicitly uses it.
 
 Markings keep the richness of methods and the logic of traits, but allow malleability, subtyping, and type anonymity.
 
-Identifiers. Almost every single identifier in the language can be based on an expression instead. `ident term` where `term` is some expression term will evaluate `term` until it becomes an identifier. `ident @str_to_ident(@concat("Hello", "World"))` is syntactically identical to `HelloWorld`. I'm hoping to add a macro system to the language to add even mroe metaprogramming capabilities. Identifiers can be written like string literals by using the `` ` `` character: `` `main`() = {}; ``.
+Identifiers. Almost every single identifier in the language can be based on an expression instead. `ident term` where `term` is some expression term will evaluate `term` until it becomes an identifier. `ident @str_to_ident(@concat("Hello", "World"))` is syntactically identical to `HelloWorld`. I'm hoping to add a macro system to the language to add even mroe metaprogramming capabilities. Identifiers can also be written like string literals by using the `` ` `` character: `` `main`() = {}; ``. Escaped identifiers are never interpreted as keywords.
 
 Another thing Taffy has is write-only references. These are in the language for API design purposes (`copy(&w T, &r T)`) but also for variance. A read-only reference is covariant over `T` (rust's `&T`), while a write-only reference is contravariant over `T`; combining readability and writability creates a reference invariant over `T`, and this is rust's `&mut T`. While relatively minor, I'm curious to see what write-only references could do.
 
@@ -35,6 +35,8 @@ opgroup Addition after Multiplication;
 `*`(lhs: S(defines N), rhs: S(N)) in Multiplication -> S(N) = @signed_mul(N, lhs, rhs);
 `+`(lhs: S(defines N), rhs: S(N)) in Addition -> S(N) = @signed_add(N, lhs, rhs);
 ```
+
+Functions can have what are currently named specifiers (this will need more bikeshedding). Specifiers begin with an exclamation mark (`!`), and are used in a very similar form to Rust's `unsafe` specifier. In fact, Taffy's analogue to `unsafe` is `!ub`. Function specifiers come after the parameter list and before the return type signifier (`->`). Any function that has specifiers must be called under a function that has a superset of those specifiers. For example, `!ub` functions must be called under `!ub` contexts. You can create a context with a specifier with the `non` keyword, followed by an expression that is allowed to use that specifier. For example, `non!ub mem.bitcast(x)` is analogous to `unsafe { std::mem::transmute(x) }` in Rust. This is a **developer** guarantee, saying that an expression does not trigger the behaviour the specifier warns against. `main` can have any set of specifiers. There are built-in specifiers that mark functions that may perform I/O, filesystem operations, network communication, undefined behaviour, and more. Specifiers can be created (syntax WIP).
 
 Finally, intrinsics. Nearly every single thing in the language boils down to either a call to an external function, or the evaluation of an intrinsic, denoted with an `@` symbol. For example, the 32-bit signed integer type, `s32`, is defined to be `S(32)`, which boils down to `marked $Signed @i(32)`. `@i` accepts any width from 0 to 65535, like Zig, and has no intrinsic operators; the `$Signed` marking does the heavy lifting there (which can also be changed to something like `$SatSigned` for saturating operations).
 
