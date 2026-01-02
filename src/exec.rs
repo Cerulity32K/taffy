@@ -8,12 +8,11 @@ use std::{
 };
 
 use num::BigInt;
-use tactical::Punctuated;
 use thiserror::Error;
 
 use crate::{
-    combo::Grouped,
-    lang::{self, Expr, Item, ItemKind, Items, Name, Term},
+    error::CompilerError,
+    lang::{self, Expr, Item, Items, Name, Term},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,10 +29,6 @@ pub enum TypeShape {
     Array(Box<Type>, usize),
     /// A union/sum type.
     Union(HashMap<String, Type>),
-    // /// The type is an unevaluated expression.
-    // ///
-    // /// Used for recursive types, such as `Node(T: type) :: { data: T, next: *rw Node(T) }` to prevent infinite recursion.
-    // Unevaluated(Expression),
 }
 impl TypeShape {
     pub const fn void() -> Self {
@@ -108,14 +103,14 @@ impl From<TypeShape> for Type {
 }
 impl Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.markings.is_empty() {
-            return Ok(());
+        if !self.markings.is_empty() {
+            write!(f, "marked [")?;
+            for marking in &self.markings {
+                write!(f, "${marking}, ")?;
+            }
+            write!(f, "] ")?;
         }
-        write!(f, "marked [")?;
-        for marking in &self.markings {
-            write!(f, "${marking}, ")?;
-        }
-        write!(f, "] {}", self.shape)
+        write!(f, "{}", self.shape)
     }
 }
 
@@ -151,8 +146,8 @@ impl ValueShape {
     pub fn to_type(&self, exec: &mut ExecContext) -> Option<Type> {
         match self {
             ValueShape::Type(ty) => Some(ty.clone()),
-            ValueShape::Integer(big_int) => None,
-            ValueShape::String(str) => None,
+            ValueShape::Integer(_) => None,
+            ValueShape::String(_) => None,
             ValueShape::Structure(fields) => {
                 let mut out = HashMap::with_capacity(fields.len());
                 for (name, ty) in fields
@@ -186,7 +181,7 @@ impl ValueShape {
                 TypeShape::Union(HashMap::from_iter([(name.clone(), value.to_type(exec)?)])).into(),
             ),
             ValueShape::Identifier(ident) => exec.get(Some(ident))?.to_type(exec),
-            ValueShape::Lazy(expr) => exec.evaluate(expr.clone(), false).unwrap().to_type(exec),
+            ValueShape::Lazy(expr) => exec.evaluate(expr.clone(), false).ok()?.to_type(exec),
             ValueShape::Function(_) => None,
         }
     }
@@ -195,14 +190,32 @@ impl Display for ValueShape {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ValueShape::Type(ty) => write!(f, "{ty}"),
-            ValueShape::Integer(big_int) => todo!(),
-            ValueShape::String(_) => todo!(),
-            ValueShape::Structure(hash_map) => todo!(),
-            ValueShape::Tuple(values) => todo!(),
-            ValueShape::Array(values) => todo!(),
-            ValueShape::Variant(_, value) => todo!(),
-            ValueShape::Identifier(_) => todo!(),
-            ValueShape::Lazy(punctuated) => todo!(),
+            ValueShape::Integer(big_int) => write!(f, "{big_int}"),
+            ValueShape::String(s) => write!(f, "{s:?}"),
+            ValueShape::Structure(map) => {
+                write!(f, "{{ ")?;
+                for (k, v) in map {
+                    write!(f, "{k}: {v}, ")?;
+                }
+                write!(f, "}}")
+            }
+            ValueShape::Tuple(values) => {
+                write!(f, "(")?;
+                for v in values {
+                    write!(f, "{v}, ")?;
+                }
+                write!(f, ")")
+            }
+            ValueShape::Array(values) => {
+                write!(f, "[")?;
+                for v in values {
+                    write!(f, "{v}, ")?;
+                }
+                write!(f, "]")
+            }
+            ValueShape::Variant(name, value) => write!(f, "<{name}: {value}>"),
+            ValueShape::Identifier(ident) => write!(f, "{ident}"),
+            ValueShape::Lazy(_) => write!(f, "<lazy>"),
             ValueShape::Function(function) => write!(f, "{function}"),
         }
     }
@@ -230,14 +243,14 @@ impl From<ValueShape> for Value {
 }
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.markings.is_empty() {
-            return Ok(());
+        if !self.markings.is_empty() {
+            write!(f, "marked [")?;
+            for marking in &self.markings {
+                write!(f, "${marking}, ")?;
+            }
+            write!(f, "] ")?;
         }
-        write!(f, "marked [")?;
-        for marking in &self.markings {
-            write!(f, "${marking}, ")?;
-        }
-        write!(f, "] {}", self.shape)
+        write!(f, "{}", self.shape)
     }
 }
 
@@ -273,19 +286,28 @@ impl Debug for FunctionValue {
 }
 impl Display for FunctionValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "")
+        write!(f, "<function>")
     }
 }
 impl PartialEq for FunctionValue {
-    fn eq(&self, other: &Self) -> bool {
-        // TODO
+    fn eq(&self, _other: &Self) -> bool {
+        // TODO: proper equality
         false
     }
 }
 impl Eq for FunctionValue {}
 
 #[derive(Clone, Copy, Debug, Error, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ExecError {}
+pub enum ExecError {
+    #[error("Invalid name")]
+    InvalidName,
+    #[error("Unknown intrinsic")]
+    UnknownIntrinsic,
+    #[error("Not implemented")]
+    NotImplemented,
+    #[error("No main function found")]
+    NoMain,
+}
 
 pub struct Scope {
     pub locals: HashMap<String, Value>,
@@ -324,70 +346,151 @@ impl ExecContext {
         self.scopes.pop();
         output
     }
-    // TODO no flags
+    
     pub fn evaluate(&mut self, expr: Expr, keep_identifiers: bool) -> Result<Value, ExecError> {
         let mut or_terms = expr.items;
         if or_terms.len() > 1 {
-            todo!("or combination");
+            return Err(ExecError::NotImplemented); // TODO: or combination
         }
         let mut and_terms = or_terms.remove(0).0.items;
         if and_terms.len() > 1 {
-            todo!("and combination");
+            return Err(ExecError::NotImplemented); // TODO: and combination
         }
         let mut binary_terms = and_terms.remove(0).0.items;
         if binary_terms.len() > 1 {
-            todo!("binary operators");
+            return Err(ExecError::NotImplemented); // TODO: binary operators
         }
         let (term, _) = binary_terms.remove(0);
         match term {
             Term::Delimited(grouped) => self.evaluate(grouped.item, keep_identifiers),
             Term::UnaryOperation((prefix, leaf, tight_postfix, loose_postfix)) => {
-                if prefix.len() > 1 || tight_postfix.len() > 1 || loose_postfix.len() > 1 {
-                    todo!("unary operations");
+                if !prefix.is_empty() || !loose_postfix.is_empty() {
+                    return Err(ExecError::NotImplemented); // TODO: prefix and loose postfix operations
                 }
-                match leaf {
+                
+                // First evaluate the leaf
+                let mut value = match leaf {
                     lang::TermLeaf::Name(name) => {
                         let name = self.evaluate_name(&name)?;
-                        self.get(Some(&name)).ok_or_else(|| todo!("invalid name"))
+                        if keep_identifiers {
+                            ValueShape::Identifier(name.clone()).into()
+                        } else {
+                            self.get(Some(&name)).ok_or(ExecError::InvalidName)?
+                        }
                     }
-                    lang::TermLeaf::String(str) => Ok(ValueShape::String(str.0).into()),
-                    lang::TermLeaf::Integer(int) => Ok(ValueShape::Integer(int.0.into()).into()),
+                    lang::TermLeaf::String(str) => ValueShape::String(str.0).into(),
+                    lang::TermLeaf::Integer(int) => ValueShape::Integer(int.0.into()).into(),
                     lang::TermLeaf::Intrinsic((_, intrinsic_name)) => {
                         let name = self.evaluate_name(&intrinsic_name)?;
                         self.evaluate_intrinsic(&name, None)
-                            .ok_or_else(|| todo!("unable to evaluate intrinsic"))
+                            .ok_or(ExecError::UnknownIntrinsic)?
                     }
-                    lang::TermLeaf::Structure(structure) => todo!(),
+                    lang::TermLeaf::Structure(_structure) => {
+                        // TODO: Implement structure parsing properly
+                        // For now, return an empty structure
+                        ValueShape::Structure(HashMap::new()).into()
+                    }
                     lang::TermLeaf::Block(expressions) => {
+                        let mut last_value = ValueShape::void().into();
                         self.new_scope(|ctx| {
-                            expressions.item.items.iter().for_each(|expr| {
-                                ctx.evaluate(expr.0.clone(), false).expect("dfsafsrrweqweq"); // TODO
-                            });
-                        });
-                        Ok(ValueShape::void().into()) // TODO block values
+                            for (expr, _) in &expressions.item.items {
+                                last_value = ctx.evaluate(expr.clone(), false)?;
+                            }
+                            Ok::<_, ExecError>(())
+                        })?;
+                        last_value
                     }
-                    lang::TermLeaf::Delimited(expr) => todo!(),
-                    lang::TermLeaf::Tuple(items) => todo!(),
-                    lang::TermLeaf::ElementwiseArray(elements) => todo!(),
-                    lang::TermLeaf::ReplicatedArray(inner) => todo!(),
-                    lang::TermLeaf::Union(_) => todo!(),
+                    lang::TermLeaf::Delimited(expr) => self.evaluate(expr.item, keep_identifiers)?,
+                    lang::TermLeaf::Tuple(items) => {
+                        let mut values = Vec::new();
+                        for (item, _) in &items.item.items {
+                            values.push(self.evaluate(item.clone(), false)?);
+                        }
+                        ValueShape::Tuple(values).into()
+                    }
+                    lang::TermLeaf::ElementwiseArray(elements) => {
+                        let mut values = Vec::new();
+                        for (elem, _) in &elements.item.items {
+                            values.push(self.evaluate(elem.clone(), false)?);
+                        }
+                        ValueShape::Array(values).into()
+                    }
+                    lang::TermLeaf::ReplicatedArray(inner) => {
+                        let value = self.evaluate(inner.item.0.clone(), false)?;
+                        let count = self.evaluate(inner.item.2.clone(), false)?;
+                        if let ValueShape::Integer(n) = count.shape {
+                            let count_usize = n.to_string().parse::<usize>().unwrap_or(0);
+                            ValueShape::Array(vec![value; count_usize]).into()
+                        } else {
+                            return Err(ExecError::NotImplemented);
+                        }
+                    }
+                    lang::TermLeaf::Union(_) => return Err(ExecError::NotImplemented),
+                };
+                
+                // Now handle tight postfix operators (like function calls)
+                for postfix in tight_postfix {
+                    match postfix {
+                        lang::TightPostfixUnaryOperator::Call(args) => {
+                            // Evaluate the arguments
+                            let mut arg_values = Vec::new();
+                            for (arg, _) in &args.item.items {
+                                arg_values.push(self.evaluate(arg.clone(), false)?);
+                            }
+                            
+                            // Call the function
+                            match &value.shape {
+                                ValueShape::Function(FunctionValue::Intrinsic(intrinsic)) => {
+                                    value = intrinsic(arg_values);
+                                }
+                                ValueShape::Function(FunctionValue::FunctionID(_)) => {
+                                    return Err(ExecError::NotImplemented); // TODO: user functions
+                                }
+                                _ => return Err(ExecError::NotImplemented),
+                            }
+                        }
+                        lang::TightPostfixUnaryOperator::Shape(_) => {
+                            return Err(ExecError::NotImplemented); // TODO: shape operators
+                        }
+                    }
+                }
+                
+                Ok(value)
+            }
+            Term::Declaration((_, pattern, _, expr)) => {
+                let value = self.evaluate(expr, false)?;
+                // For now, only handle simple name bindings
+                match pattern {
+                    lang::Pattern::Binder(name) => {
+                        let var_name = self.evaluate_name(&name)?;
+                        self.scopes.last_mut().unwrap().locals.insert(var_name, value.clone());
+                        Ok(value)
+                    }
+                    _ => Err(ExecError::NotImplemented),
                 }
             }
-            Term::Declaration(_) => todo!(),
         }
     }
+    
     pub fn evaluate_name(&mut self, name: &Name) -> Result<String, ExecError> {
         match name {
             Name::Raw(ident) => Ok(ident.repr.clone()),
-            Name::FromExpression((_, expr)) => match self.evaluate(expr.clone(), true).unwrap() {
-                Value {
-                    shape: ValueShape::Identifier(ident),
-                    ..
-                } => Ok(ident),
-                other => panic!("`{other}` is not an identifier"),
-            },
+            Name::FromExpression((_, expr)) => {
+                match self.evaluate(expr.clone(), true)? {
+                    Value {
+                        shape: ValueShape::Identifier(ident),
+                        ..
+                    } => Ok(ident),
+                    Value {
+                        shape: ValueShape::String(s),
+                        ..
+                    } => Ok(s),
+                    _ => Err(ExecError::InvalidName),
+                }
+            }
         }
     }
+    
     pub fn get(&self, name: Option<&str>) -> Option<Value> {
         for scope in self.scopes.iter().rev() {
             if let Some(name) = name {
@@ -402,11 +505,7 @@ impl ExecContext {
         }
         None
     }
-    /// Evaluates an intrinsic.
-    ///
-    /// In forms of direct calls (`@<ident>(<args>)`), `args` is `Some`.
-    /// Otherwise, **although an attempt might be made call the intrinsic indirectly**, `args` will be None.
-    /// Some intrinsics require direct calling, as they may fudge with expression evaluation.
+    
     pub fn evaluate_intrinsic(
         &mut self,
         name: &str,
@@ -414,18 +513,31 @@ impl ExecContext {
     ) -> Option<Value> {
         let make_fn: fn(fn(Vec<Value>) -> Value) -> Value =
             |f| ValueShape::Function(FunctionValue::Intrinsic(Arc::new(f))).into();
+        
         let result: Value = match name {
             "dbg" => make_fn(|args| {
-                args.iter().for_each(|arg| println!("{}", arg));
+                for arg in args {
+                    println!("{}", arg);
+                }
                 ValueShape::void().into()
             }),
             "dyn" => ValueShape::Type(TypeShape::Dynamic.into()).into(),
-            _ => panic!("unknown intrinsic `{name}`"),
+            "concat" => make_fn(|args| {
+                let mut result = String::new();
+                for arg in args {
+                    if let ValueShape::String(s) = arg.shape {
+                        result.push_str(&s);
+                    }
+                }
+                ValueShape::String(result).into()
+            }),
+            _ => return None,
         };
+        
         if let Some(args) = args {
             if let ValueShape::Function(function) = &result.shape {
                 match function {
-                    FunctionValue::FunctionID(_) => todo!(),
+                    FunctionValue::FunctionID(_) => None, // TODO
                     FunctionValue::Intrinsic(intrinsic) => {
                         Some(intrinsic(
                             args.iter()
@@ -435,7 +547,7 @@ impl ExecContext {
                     }
                 }
             } else {
-                todo!("intrinsic @{name} is not functional")
+                None
             }
         } else {
             Some(result)
@@ -443,19 +555,38 @@ impl ExecContext {
     }
 }
 
-pub fn execute_main(items: Items) -> Result<Value, ExecError> {
+pub fn execute_main(items: Items) -> Result<Value, CompilerError> {
     let mut context = ExecContext::new();
     for (item, _) in items.items {
         match item {
-            Item::Definition(kind) => match kind {
-                ItemKind::Function((name, _, _, expr)) => {
-                    if context.evaluate_name(&name)? == "main" {
-                        return Ok(context.new_scope(|ctx| ctx.evaluate(expr, false))?);
+            Item::Function(func_decl) => {
+                let (name, params, _, expr) = func_decl;
+                let func_name = context.evaluate_name(&name)
+                    .map_err(|_| CompilerError::IO(std::io::Error::new(
+                        std::io::ErrorKind::Other, 
+                        "Failed to evaluate function name"
+                    )))?;
+                
+                if func_name == "main" {
+                    if params.is_none() || params.as_ref().unwrap().item.items.is_empty() {
+                        return context.new_scope(|ctx| ctx.evaluate(expr, false))
+                            .map_err(|e| CompilerError::IO(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                format!("Execution error: {:?}", e)
+                            )));
                     }
                 }
-            },
-            _ => {}
+            }
+            Item::Marking(_) => {
+                // Markings are processed but don't execute
+            }
+            Item::Constraint(_) => {
+                // Constraints are for type checking
+            }
         }
     }
-    todo!("no main")
+    Err(CompilerError::IO(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "No main function found"
+    )))
 }

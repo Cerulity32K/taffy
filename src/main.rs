@@ -10,7 +10,7 @@ include!("macros.rs");
 
 pub mod combo;
 pub mod error;
-// pub mod exec;
+pub mod exec;
 pub mod lang;
 pub mod tok;
 
@@ -19,11 +19,14 @@ use std::fs;
 use tactical::{ParseContext, Span, Syntax, cursor};
 
 use crate::{
-    error::{CompilerError, ParseError}, lang::Items, tok::tokenise
+    error::{CompilerError, ParseError}, 
+    lang::Items, 
+    tok::tokenise,
+    exec::execute_main,
 };
 
 fn compiler_main() -> std::result::Result<(), CompilerError> {
-    let source = fs::read_to_string("source.taf")?;
+    let source = fs::read_to_string("test.taf")?;
     let tokens = tokenise(&source).map_err(|err| (source.clone(), err))?;
     let eof_span = tokens
         .last()
@@ -45,6 +48,12 @@ fn compiler_main() -> std::result::Result<(), CompilerError> {
     }
 
     println!("Resultant syntax tree: {:?}", items);
+    println!("\n=== Executing ===\n");
+    
+    let result = execute_main(items)?;
+    println!("\n=== Execution Complete ===");
+    println!("Main returned: {}", result);
+    
     Ok(())
 }
 

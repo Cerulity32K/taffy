@@ -1,3 +1,11 @@
 main() = {
-    @dbg("Hello, world!");
+    @dbg("=== Taffy Feature Test ===");
+    @dbg(42);
+    @dbg((100, 200, 300));
+    @dbg([1, 2, 3, 5, 8, 13]);
+    @dbg("Type system:");
+    @dbg(int);
+    @dbg(@dyn);
+    @dbg(@concat("Hello", ", ", "world!"));
+    @dbg("=== Test Complete ===");
 };
